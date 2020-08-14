@@ -2,6 +2,7 @@ package collapsar
 
 import (
 	"collapsar/hash"
+	"collapsar/policy"
 	"log"
 	"time"
 )
@@ -12,14 +13,14 @@ func init() {
 	log.SetFlags(log.Llongfile | log.Lmicroseconds | log.Ldate)
 }
 // 失效处理函数
-type FailHandlerFunc = func(string) (interface{}, error)
+type FailHandlerFunc = func(policy.KeyType) (interface{}, error)
 
 // 删除处理函数
-type RemoveHandlerFunc = func(string, interface{})
+type RemoveHandlerFunc = func(policy.KeyType, interface{})
 
 type Cache struct {
 	// 偏移量
-	offset uint32
+	offset uint64
 	// 存储的单元长度
 	length int
 	// 存储
@@ -51,10 +52,10 @@ func NewCache(option *Option) *Cache {
 	var calculator HashInterface
 	calculator = option.Calculator
 	if calculator == nil {
-		calculator = hash.NewAdlerHash()
+		calculator = hash.NewFnvHash()
 	}
 	cache := &Cache{
-		offset:      uint32(i),
+		offset:      uint64(i),
 		length:      adjustLength,
 		storageList: make([]StorageInterface, adjustLength),
 		calculator:  calculator,
@@ -68,13 +69,13 @@ func NewCache(option *Option) *Cache {
 	return cache
 }
 
-func (c *Cache) hash(key string) uint32 {
+func (c *Cache) hash(key string) uint64 {
 	h := c.calculator.Hash(key)
 	return h
 }
 
 // 计算哈希并获取下表
-func (c *Cache) getIndex(hash uint32) uint32 {
+func (c *Cache) getIndex(hash uint64) uint64 {
 	// 高位和低位数异或混淆，然后进行取模运算生成下标
 	index := ((hash >> c.offset) ^ hash) & (c.offset - 1)
 	return index
@@ -91,23 +92,23 @@ func (c *Cache) AddWithTTL(key string, val interface{}, ttl int64) (interface{},
 	h := c.hash(key)
 	index := c.getIndex(h)
 	if ttl == -1 {
-		return c.storageList[index].Add(key, val, -1)
+		return c.storageList[index].Add(policy.KeyType(h), val, -1)
 	}
-	return c.storageList[index].Add(key, val, ttl+time.Now().Unix())
+	return c.storageList[index].Add(policy.KeyType(h), val, ttl+time.Now().Unix())
 }
 
 // 获取元素
 func (c *Cache) Get(key string) (interface{}, error) {
 	h := c.hash(key)
 	index := c.getIndex(h)
-	return c.storageList[index].Get(key)
+	return c.storageList[index].Get(policy.KeyType(h))
 }
 
 // 获取元素剩余的TTL时间
 func (c *Cache) TTL(key string) (int64, error) {
 	h := c.hash(key)
 	index := c.getIndex(h)
-	return c.storageList[index].TTL(key)
+	return c.storageList[index].TTL(policy.KeyType(h))
 
 }
 

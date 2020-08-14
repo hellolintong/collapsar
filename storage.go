@@ -8,38 +8,28 @@ import (
 	"time"
 )
 
-const MaxAvailItems = 128
-
 var ExpiredKeyError = errors.New("expired key")
 var NotFoundKeyError = errors.New("can't find key")
 
 // 具体存储的节点
 type Item struct {
 	ttl   int64
-	key   string
+	key   policy.KeyType
 	value interface{}
-	next  *Item
 }
 
-func (i *Item) Set(key string, val interface{}, ttl int64) {
+func (i *Item) Set(key policy.KeyType, val interface{}, ttl int64) {
 	i.key = key
 	i.value = val
 	i.ttl = ttl
-	i.next = nil
 }
 
-func NewItem() *Item {
-	return &Item{
-	}
-}
 
 // 存储的节点单元
 type Node struct {
 	locker sync.RWMutex
-	// 缓存空闲的节点
-	availItems *Item
 	// 当前可用的节点
-	items map[string]*Item
+	items map[policy.KeyType]Item
 	// 淘汰策略
 	eliminate policy.EliminateInterface
 	// 失效处理函数
@@ -49,48 +39,20 @@ type Node struct {
 }
 
 func NewNode(option *Option) *Node {
-	return &Node{
-		items:     make(map[string]*Item),
+	node := &Node{
+		items:     make(map[policy.KeyType]Item),
 		failHandler: option.FailHandler,
 		removeHandler: option.RemoveHandler,
 		eliminate: option.EliminateHandler,
 	}
-}
-
-// 由外部线程保证线程安全
-func (n *Node) fetchFromAvail() *Item {
-	if n.availItems == nil || n.availItems.next == nil {
-		for i := 0; i < MaxAvailItems/8; i++ {
-			if n.availItems == nil {
-				n.availItems = NewItem()
-			} else {
-				item := NewItem()
-				item.next = n.availItems.next
-				n.availItems.next = item
-			}
-		}
-	}
-	item := n.availItems.next
-	n.availItems.next = item.next
-	item.next = nil
-	return item
-}
-
-// 由外部线程保证线程安全
-func (n *Node) putToAvail(item *Item) {
-	if n.availItems == nil {
-		n.availItems = item
-	} else {
-		item.next = n.availItems.next
-		n.availItems.next = item
-	}
+	return node
 }
 
 func (n *Node) clearExpire() error {
 	n.locker.Lock()
 	defer n.locker.Unlock()
 
-	keys := make([]string, 0)
+	keys := make([]policy.KeyType, 0)
 	for key := range n.items {
 		keys = append(keys, key)
 	}
@@ -107,7 +69,7 @@ func (n *Node) clearExpire() error {
 		item := &Item{}
 		for _, key := range removeKeys {
 			item.key = key
-			log.Printf("ready to remove key:%s", key)
+			log.Printf("ready to remove key:%d", key)
 			_, _ = n.remove(item, false)
 		}
 	}
@@ -115,8 +77,8 @@ func (n *Node) clearExpire() error {
 	return nil
 }
 
-func (n *Node) get(key string, needLock bool) (*Item, error) {
-	var item *Item
+func (n *Node) get(key policy.KeyType, needLock bool) (*Item, error) {
+	var item Item
 	var ok bool
 	if needLock {
 		n.locker.RLock()
@@ -132,13 +94,13 @@ func (n *Node) get(key string, needLock bool) (*Item, error) {
 		}
 		// 超时key
 		if item.ttl == -1 || time.Now().Unix()-item.ttl < 0 {
-			return item, nil
+			return &item, nil
 		} else {
-			_, err := n.remove(item, needLock)
+			_, err := n.remove(&item, needLock)
 			if err != nil {
 				return nil, err
 			}
-			return item, ExpiredKeyError
+			return &item, ExpiredKeyError
 		}
 	}
 
@@ -154,7 +116,6 @@ func (n *Node) remove(item *Item, needLock bool) (interface{}, error) {
 		n.removeHandler(item.key, item.value)
 	}
 
-	n.putToAvail(item)
 	delete(n.items, item.key)
 	if n.eliminate != nil {
 		n.eliminate.RemoveKey(item.key)
@@ -168,16 +129,17 @@ func (n *Node) remove(item *Item, needLock bool) (interface{}, error) {
 }
 
 // 添加
-func (n *Node) Add(key string, val interface{}, ttl int64) (interface{}, error) {
+func (n *Node) Add(key policy.KeyType, val interface{}, ttl int64) (interface{}, error) {
 	n.locker.Lock()
 	defer n.locker.Unlock()
 
 	if item, ok := n.items[key]; ok {
 		item.value = val
 		item.ttl = ttl
+		n.items[key] = item
 		return item.value, nil
 	} else {
-		availItem := n.fetchFromAvail()
+		availItem := Item{}
 		availItem.Set(key, val, ttl)
 		n.items[key] = availItem
 		if n.eliminate != nil {
@@ -188,7 +150,7 @@ func (n *Node) Add(key string, val interface{}, ttl int64) (interface{}, error) 
 }
 
 // 获取元素
-func (n *Node) Get(key string) (interface{}, error) {
+func (n *Node) Get(key policy.KeyType) (interface{}, error) {
 	item, err := n.get(key, true)
 	if err == nil && item != nil {
 		return item.value, nil
@@ -210,7 +172,7 @@ func (n *Node) Get(key string) (interface{}, error) {
 }
 
 // 获取元素剩余的TTL时间
-func (n *Node) TTL(key string) (int64, error) {
+func (n *Node) TTL(key policy.KeyType) (int64, error) {
 	item, err := n.get(key, true)
 	if err == nil && item != nil {
 		return time.Now().Unix() - item.ttl, nil
@@ -219,7 +181,7 @@ func (n *Node) TTL(key string) (int64, error) {
 }
 
 // 删除元素
-func (n *Node) Remove(key string) (interface{}, error) {
+func (n *Node) Remove(key policy.KeyType) (interface{}, error) {
 	item, err := n.get(key, true)
 	if err == nil && item != nil {
 		return n.remove(item, true)

@@ -2,6 +2,7 @@ package collapsar
 
 import (
 	"fmt"
+	"github.com/allegro/bigcache"
 	"sync"
 	"testing"
 	"time"
@@ -125,5 +126,27 @@ func TestCacheTTL(t *testing.T) {
 	val, err = cache.Get("test")
 	if err != nil || val == nil || val.(int) != 11 {
 		t.Errorf("check ttl timeout fail")
+	}
+}
+
+func BenchmarkCache(b *testing.B){
+	option := &Option{
+		Length: 1024,
+	}
+	cache := NewCache(option)
+	values := []byte("bench_mark_test")
+	b.ResetTimer()
+	for i := 0; i < 1000000; i++ {
+		cache.Add(fmt.Sprintf("test_%d", i), values)
+	}
+
+}
+
+func BenchmarkBigCache(b *testing.B){
+	cache, _ := bigcache.NewBigCache(bigcache.DefaultConfig(10 * time.Minute))
+	values := []byte("bench_mark_test")
+	b.ResetTimer()
+	for i := 0; i < 1000000; i++ {
+		cache.Set(fmt.Sprintf("test_%d", i), values)
 	}
 }
